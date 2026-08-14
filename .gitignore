@@ -21,3 +21,4 @@ local.properties
 # 签名文件
 *.jks
 *.keystore
+/.kotlin/
