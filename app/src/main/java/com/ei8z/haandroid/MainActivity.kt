@@ -19,7 +19,8 @@ import com.ei8z.haandroid.data.SettingsManager
 import com.ei8z.haandroid.databinding.ActivityMainBinding
 import com.ei8z.haandroid.service.VisionForegroundService
 import com.ei8z.haandroid.vision.VisionProcessor
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 
@@ -59,12 +60,10 @@ class MainActivity : AppCompatActivity() {
     private fun setupUI() {
         binding.btnStartService.setOnClickListener {
             startVisionService()
-            binding.tvStatus.text = "状态: 后台服务已启动"
         }
 
         binding.btnStopService.setOnClickListener {
             stopVisionService()
-            binding.tvStatus.text = "状态: 后台服务已停止"
         }
     }
 
@@ -80,10 +79,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 相机所有权约定（避免 CameraX unbindAll 双组件互杀）：
+     * - 服务未运行：Activity 持有相机做本地预览；
+     * - 服务运行中：相机由前台服务持有，Activity 只显示状态。
+     */
     private fun setupVisionEngine() {
         lifecycleScope.launch {
+            if (VisionForegroundService.isRunning) {
+                binding.tvStatus.text = "状态: 后台服务运行中（相机由服务持有）"
+                return@launch
+            }
+            if (visionProcessor != null) return@launch // 已初始化，避免重复绑定
             val settings = SettingsManager(this@MainActivity)
-            val nodeId = settings.nodeId.first()
+            val nodeId = settings.getOrCreateNodeId()
             visionProcessor = VisionProcessor(this@MainActivity, nodeId)
             startCameraPreview()
         }
@@ -106,7 +115,8 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                lifecycleScope.launch {
+                // 推理为同步调用，必须放后台线程，避免主线程 ANR
+                lifecycleScope.launch(Dispatchers.Default) {
                     val result = visionProcessor?.processImage(imageProxy)
                     result?.let {
                         // 在主线程更新 UI 遮罩层
@@ -131,22 +141,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVisionService() {
+        // 先释放 Activity 的相机占用，避免与服务抢占 CameraX
+        ProcessCameraProvider.getInstance(this).addListener({
+            ProcessCameraProvider.getInstance(this).get().unbindAll()
+        }, ContextCompat.getMainExecutor(this))
+
         val intent = Intent(this, VisionForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
             startService(intent)
         }
+        binding.tvStatus.text = "状态: 后台服务启动中…"
     }
 
     private fun stopVisionService() {
         val intent = Intent(this, VisionForegroundService::class.java)
         stopService(intent)
+        // 等服务销毁（isRunning=false）后恢复本地预览
+        lifecycleScope.launch {
+            delay(400)
+            setupVisionEngine()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
         visionProcessor?.release()
+        visionProcessor = null
     }
 }

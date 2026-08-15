@@ -7,6 +7,7 @@ import android.graphics.RectF
 import android.util.Log
 import androidx.camera.core.ImageProxy
 import com.ei8z.haandroid.data.model.Detection
+import com.ei8z.haandroid.data.model.Environment
 import com.ei8z.haandroid.data.model.VisionDetectionMessage
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -22,6 +23,9 @@ import kotlinx.coroutines.sync.withLock
  * - 人员感知：MediaPipe blaze_face 检测 + MobileFaceNet 身份特征提取
  * - 物料标识：ML Kit 条码/二维码解码（托盘/物料/工单标签）
  * - 检测策略可由 MQTT 命令 `set_detection_policy` 动态开关（见 VisionForegroundService）
+ *
+ * 线程模型：本类所有方法都在单线程内串行调用（调用方持 Mutex + 单线程执行器），
+ * 其中条码解码内部切换到 Default 线程池。
  */
 class VisionProcessor(private val context: Context, private val nodeId: String) {
 
@@ -61,6 +65,10 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
         }
     }
 
+    /**
+     * 处理一帧。ImageProxy 的所有权转交给本方法：无论成功失败都会关闭。
+     * 同一时刻只处理一帧（Mutex），竞争帧直接丢弃。
+     */
     suspend fun processImage(imageProxy: ImageProxy): VisionDetectionMessage? {
         if (processingMutex.isLocked) {
             imageProxy.close()
@@ -72,7 +80,6 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                 val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                 val bitmap = imageProxy.toBitmap().rotate(rotationDegrees.toFloat())
 
-                val mpImage = BitmapImageBuilder(bitmap).build()
                 val imageWidth = bitmap.width.toFloat()
                 val imageHeight = bitmap.height.toFloat()
 
@@ -80,34 +87,38 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
 
                 // 1. 人员感知（可被 MQTT 策略关闭）
                 if (enablePersonDetection) {
-                    faceDetector?.detect(mpImage)?.detections()?.forEach { face ->
-                        val bbox = face.boundingBox()
+                    val mpImage = BitmapImageBuilder(bitmap).build()
+                    try {
+                        faceDetector?.detect(mpImage)?.detections()?.forEach { face ->
+                            val bbox = face.boundingBox()
 
-                        // 身份特征提取
-                        val identity = try {
-                            val faceBitmap = cropFace(bitmap, bbox)
-                            val embedding = faceRecognizer.recognize(faceBitmap)
-                            // 上报完整的 Embedding 字符串，供后端匹配身份
-                            // 格式示例: "0.123,0.456,-0.789..."
-                            embedding.joinToString(",") { String.format("%.4f", it) }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Recognition error", e)
-                            "err"
+                            // 身份特征提取
+                            val identity = try {
+                                val faceBitmap = cropFace(bitmap, bbox)
+                                val embedding = faceRecognizer.recognize(faceBitmap)
+                                // 上报完整的 Embedding 字符串，供后端匹配身份
+                                embedding.joinToString(",") { String.format("%.4f", it) }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Recognition error", e)
+                                "err"
+                            }
+
+                            val normBbox = listOf(
+                                bbox.left / imageWidth,
+                                bbox.top / imageHeight,
+                                bbox.width() / imageWidth,
+                                bbox.height() / imageHeight
+                            )
+
+                            allDetections.add(Detection(
+                                type = "person",
+                                identity = identity,
+                                confidence = face.categories().firstOrNull()?.score(),
+                                bbox = normBbox
+                            ))
                         }
-
-                        val normBbox = listOf(
-                            bbox.left / imageWidth,
-                            bbox.top / imageHeight,
-                            bbox.width() / imageWidth,
-                            bbox.height() / imageHeight
-                        )
-
-                        allDetections.add(Detection(
-                            type = "person",
-                            identity = identity,
-                            confidence = face.categories().firstOrNull()?.score() ?: 0f,
-                            bbox = normBbox
-                        ))
+                    } finally {
+                        mpImage.close() // 释放 GPU delegate 持有的原生句柄
                     }
                 }
 
@@ -118,7 +129,7 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                             type = "barcode",
                             value = scan.value,
                             format = scan.format,
-                            confidence = scan.confidence,
+                            confidence = null, // 条码解码无置信度语义
                             bbox = scan.normalizedBox
                         ))
                     }
@@ -128,7 +139,8 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                 VisionDetectionMessage(
                     node_id = nodeId,
                     timestamp = System.currentTimeMillis(),
-                    detections = allDetections
+                    detections = allDetections,
+                    environment = Environment(location = nodeId)
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Processing error: ${e.message}")

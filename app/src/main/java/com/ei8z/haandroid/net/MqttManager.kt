@@ -3,6 +3,9 @@ package com.ei8z.haandroid.net
 import android.content.Context
 import android.util.Log
 import com.ei8z.haandroid.data.model.CommandMessage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.eclipse.paho.client.mqttv3.*
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import kotlinx.serialization.encodeToString
@@ -16,8 +19,6 @@ class MqttManager(private val context: Context, private val nodeId: String) {
     internal val TAG = "MqttManager"
 
     private val statusTopic = "ind/vision/$nodeId/status"
-    private val detectionTopic = "ind/vision/$nodeId/detection"
-    private val heartbeatTopic = "ind/vision/$nodeId/heartbeat"
 
     interface CommandListener {
         fun onCommandReceived(command: CommandMessage)
@@ -28,9 +29,11 @@ class MqttManager(private val context: Context, private val nodeId: String) {
             mqttClient = MqttAsyncClient(brokerUrl, "ind_vision_$nodeId", MemoryPersistence())
             val options = MqttConnectOptions().apply {
                 isCleanSession = false
+                isAutomaticReconnect = true   // 断线自动重连（配合 CleanSession=false 补报）
+                connectionTimeout = 10
                 keepAliveInterval = 60
                 // 设置遗言 (LWT)
-                setWill(statusTopic, "offline".toByteArray(), 1, true)
+                setWill(statusTopic, "offline".toByteArray(Charsets.UTF_8), 1, true)
             }
 
             mqttClient?.connect(options, null, object : IMqttActionListener {
@@ -66,7 +69,8 @@ class MqttManager(private val context: Context, private val nodeId: String) {
             }
 
             override fun connectionLost(cause: Throwable?) {
-                Log.w(TAG, "Connection lost, will retry...")
+                // isAutomaticReconnect=true 时由 Paho 自动重连，这里仅记录
+                Log.w(TAG, "Connection lost, auto-reconnect enabled: ${cause?.message}")
             }
 
             override fun deliveryComplete(token: IMqttDeliveryToken?) {}
@@ -124,11 +128,32 @@ class MqttManager(private val context: Context, private val nodeId: String) {
     @PublishedApi
     internal fun publish(topic: String, payload: String, qos: Int = 0, retained: Boolean = false) {
         if (mqttClient?.isConnected == true) {
-            val message = MqttMessage(payload.toByteArray()).apply {
+            val message = MqttMessage(payload.toByteArray(Charsets.UTF_8)).apply {
                 this.qos = qos
                 isRetained = retained
             }
             mqttClient?.publish(topic, message)
+        }
+    }
+
+    /**
+     * 发布并在 Broker 确认后回调（QoS1）。
+     * 用于离线补报：确认送达后才允许删除本地缓存。
+     */
+    fun publishWithCallback(topic: String, payload: String, qos: Int = 1, onDelivered: suspend () -> Unit) {
+        if (mqttClient?.isConnected == true) {
+            val message = MqttMessage(payload.toByteArray(Charsets.UTF_8)).apply {
+                this.qos = qos
+            }
+            mqttClient?.publish(topic, message, null, object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    CoroutineScope(Dispatchers.IO).launch { onDelivered() }
+                }
+
+                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    Log.w(TAG, "Publish failed, keep local cache: ${exception?.message}")
+                }
+            })
         }
     }
 

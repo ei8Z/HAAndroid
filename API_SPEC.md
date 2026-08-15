@@ -37,6 +37,7 @@
 
 - **ClientID**: `ind_vision_${node_id}`
 - **CleanSession**: `false` (确保离线期间指令不丢失)
+- **AutomaticReconnect**: `true`（断线自动重连，配合 CleanSession=false 实现离线补报）
 - **KeepAlive**: `60s`
 
 **在线状态同步 (Standard LWT)**:
@@ -82,7 +83,7 @@ data class VisionDetectionMessage(
 data class Detection(
     val type: String,           // "person" | "barcode"
     val identity: String? = null,   // person: 身份特征向量（逗号分隔）
-    val confidence: Float,
+    val confidence: Float? = null,  // person: 置信度 0-1；barcode: null（无置信度语义）
     val bbox: List<Float>? = null,  // 归一化 [x, y, w, h]
     val action: String? = null,     // 人员行为描述（预留）
     val landmarks: List<Point>? = null,
@@ -102,11 +103,11 @@ data class Detection(
       "type": "barcode",
       "value": "WO-20260803-0017",
       "format": "CODE_128",
-      "confidence": 1.0,
+      "confidence": null,
       "bbox": [0.31, 0.42, 0.26, 0.18]
     }
   ],
-  "environment": { "location": "line_a", "light_level": 0.7 },
+  "environment": { "location": "line_a", "light_level": null },
   "is_historical": false
 }
 ```
@@ -124,9 +125,11 @@ data class Detection(
       "confidence": 0.96,
       "bbox": [0.52, 0.20, 0.15, 0.30]
     }
-  ],
-  "is_historical": false
+  ]
 }
+```
+
+> 序列化规则：`encodeDefaults=false`，默认值字段不输出——`is_historical=false` 省略即表示实时消息；`environment.light_level` 未采集时省略。
 ```
 
 #### B. 心跳与元数据 (Heartbeat)
@@ -151,9 +154,9 @@ data class Detection(
 | command | 参数 | 说明 |
 |---------|------|------|
 | `set_detection_policy` | `enable_person`(bool), `enable_barcode`(bool) | 动态开关检测项，**持久化到 DataStore** |
-| `capture_event` | `event_id`(string) | 现场事件留痕（审计日志） |
+| `capture_event` | `event_id`(string) | 现场事件留痕（演示级桩，正式版接审计系统） |
 | `send_alert` | `alert_type`, `message`, `severity` | 终端侧安全告警（通知栏） |
-| `update_config` | 任意键值 | 配置热更新 |
+| `update_config` | 任意键值 | 配置热更新（演示级桩） |
 
 ```json
 {
@@ -187,8 +190,8 @@ data class Detection(
 
 ### 3. 数据持久化
 
-- **Room**: `offline_detections` 表，1000 条 FIFO，补报后删除
-- **DataStore**: NodeID / Broker / FPS / 检测策略
+- **Room**: `offline_detections` 表，1000 条 FIFO；补报走 QoS1，**Broker 确认送达后才删除**缓存
+- **DataStore**: NodeID（首次生成即落盘，进程间一致）/ Broker / FPS / 检测策略
 
 ---
 

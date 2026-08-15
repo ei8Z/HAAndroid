@@ -82,7 +82,8 @@ class OverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs)
             val label = if (isBarcode) {
                 "${detection.format}: ${(detection.value ?: "").take(18)}"
             } else {
-                "person: ${detection.identity?.take(10)}"
+                val conf = detection.confidence?.let { String.format("%.2f", it) } ?: "?"
+                "person($conf)"
             }
             canvas.drawText(label, rect.left, rect.top - 20, textPaint)
         }

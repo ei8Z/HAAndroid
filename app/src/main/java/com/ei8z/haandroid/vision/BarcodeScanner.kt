@@ -8,6 +8,7 @@ import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
 /**
@@ -21,7 +22,6 @@ data class BarcodeScan(
     val value: String,
     val format: String,
     val normalizedBox: List<Float>?,
-    val confidence: Float = 1f,
 )
 
 /**
@@ -34,6 +34,9 @@ data class BarcodeScan(
 class BarcodeScanner {
 
     private val TAG = "BarcodeScanner"
+
+    /** ML Kit 回调执行器：显式后台线程，避免默认主线程回调 */
+    private val callbackExecutor = Executors.newSingleThreadExecutor()
 
     private val scanner = BarcodeScanning.getClient(
         com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
@@ -49,7 +52,7 @@ class BarcodeScanner {
         suspendCancellableCoroutine { continuation ->
             val image = InputImage.fromBitmap(bitmap, 0)
             scanner.process(image)
-                .addOnSuccessListener { barcodes ->
+                .addOnSuccessListener(callbackExecutor) { barcodes ->
                     val results = barcodes.mapNotNull { barcode ->
                         val value = barcode.rawValue ?: barcode.displayValue ?: return@mapNotNull null
                         BarcodeScan(
@@ -67,7 +70,7 @@ class BarcodeScanner {
                     }
                     if (continuation.isActive) continuation.resume(results)
                 }
-                .addOnFailureListener { e ->
+                .addOnFailureListener(callbackExecutor) { e ->
                     Log.w(TAG, "Barcode scan failed (degraded to empty): ${e.message}")
                     if (continuation.isActive) continuation.resume(emptyList())
                 }
@@ -93,5 +96,6 @@ class BarcodeScanner {
 
     fun close() {
         scanner.close()
+        callbackExecutor.shutdown()
     }
 }

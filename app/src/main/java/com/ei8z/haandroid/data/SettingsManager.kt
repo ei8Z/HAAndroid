@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 
@@ -53,6 +54,20 @@ class SettingsManager(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[NODE_ID] = id
         }
+    }
+
+    /**
+     * 获取节点 ID；首次运行时生成并立即落盘，
+     * 保证 Activity 预览与服务上报使用同一个 node_id（避免 LWT retained 残留漂移）。
+     */
+    suspend fun getOrCreateNodeId(): String {
+        val existing = context.dataStore.data.first()[NODE_ID]
+        if (existing != null) return existing
+        val generated = "node_${UUID.randomUUID().toString().take(8)}"
+        context.dataStore.edit { preferences ->
+            preferences[NODE_ID] = generated
+        }
+        return generated
     }
 
     suspend fun updateMqttBroker(url: String) {

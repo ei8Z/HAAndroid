@@ -25,6 +25,7 @@
 | Client ID 格式 | `ind_vision_${node_id}` |
 | Keep Alive | `60` 秒 |
 | Clean Session | `false` |
+| 自动重连 | `true`（isAutomaticReconnect，断线自动恢复） |
 
 ### IP 地址配置（真机测试）
 
@@ -88,12 +89,11 @@ hostname -I
       "type": "barcode",
       "value": "WO-20260803-0017",
       "format": "CODE_128",
-      "confidence": 1.0,
+      "confidence": null,
       "bbox": [0.31, 0.42, 0.26, 0.18]
     }
   ],
-  "environment": { "location": "line_a", "light_level": 0.7 },
-  "is_historical": false
+  "environment": { "location": "line_a" }
 }
 ```
 
@@ -110,8 +110,7 @@ hostname -I
       "confidence": 0.96,
       "bbox": [0.52, 0.20, 0.15, 0.30]
     }
-  ],
-  "is_historical": false
+  ]
 }
 ```
 
@@ -125,11 +124,11 @@ hostname -I
 | `detections[].value` | string? | 条码解码内容（type=barcode） |
 | `detections[].format` | string? | 制式：QR_CODE / CODE_128 / EAN_13 ... |
 | `detections[].identity` | string? | 人员身份特征向量（后端匹配） |
-| `detections[].confidence` | float | 置信度 0-1 |
+| `detections[].confidence` | float? | person: 置信度 0-1；barcode: null（无置信度语义） |
 | `detections[].bbox` | list? | 归一化边界框 [x, y, w, h] |
-| `is_historical` | boolean | 是否为离线补报数据 |
+| `is_historical` | boolean | 离线补报标记；**实时消息省略此字段（默认 false）** |
 
-> 离线补报：MQTT 断连时检测结果写入 Room（上限 1000 条 FIFO），重连后以 `is_historical=true` 补报。
+> 离线补报：MQTT 断连时检测结果写入 Room（上限 1000 条 FIFO），自动重连后以 `is_historical=true` 补报；补报走 QoS1，Broker 确认送达后才删除本地缓存。
 
 ---
 
@@ -193,4 +192,4 @@ mosquitto_pub -h 192.168.0.3 -t "ind/command/policy" -m '{"command":"set_detecti
 | 真机连不上 Broker | 检查同一 WiFi；`ipconfig getifaddr en0` 获取电脑 IP 替换 `192.168.0.3` |
 | 模拟器连不上 | 使用 `10.0.2.2` |
 | 检测结果不推送 | 确认 `enable_barcode/enable_person` 策略；确认 App 在前台服务状态 |
-| 离线数据不补报 | 确认 `CleanSession=false` 且 Broker 允许 retained 消息 |
+| 离线数据不补报 | 补报是客户端主动重发（QoS1）：确认 `CleanSession=false`、自动重连已启用；重连后最长 5s 内触发 |

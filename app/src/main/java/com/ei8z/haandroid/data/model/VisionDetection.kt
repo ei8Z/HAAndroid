@@ -15,7 +15,7 @@ data class VisionDetectionMessage(
 data class Detection(
     val type: String,           // "person", "barcode"
     val identity: String? = null,
-    val confidence: Float,
+    val confidence: Float? = null, // person: 检测置信度 0-1；barcode: 无置信度（null）
     val bbox: List<Float>? = null, // [x, y, w, h]
     val action: String? = null,    // 人员行为描述（预留）
     val landmarks: List<Point>? = null, // 关键点坐标

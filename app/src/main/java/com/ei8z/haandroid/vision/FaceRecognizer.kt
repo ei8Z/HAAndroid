@@ -5,7 +5,6 @@ import android.content.res.AssetManager
 import android.graphics.Bitmap
 import android.util.Log
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -20,11 +19,10 @@ class FaceRecognizer(context: Context) {
     init {
         try {
             val options = Interpreter.Options()
-            val compatList = CompatibilityList()
-            if (compatList.isDelegateSupportedOnThisDevice) {
-                val delegateOptions = compatList.bestOptionsForThisDevice
-                options.addDelegate(GpuDelegate(delegateOptions))
-            } else {
+            try {
+                options.addDelegate(GpuDelegate())
+            } catch (e: Exception) {
+                Log.w("FaceRecognizer", "GPU delegate unavailable, fallback to CPU: ${e.message}")
                 options.setNumThreads(4)
             }
             

@@ -71,11 +71,9 @@ dependencies {
     // TFLite - 修正点
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.gpu)
-    implementation(libs.tensorflow.lite.play.services.gpu)
 
     // MQTT
     implementation(libs.paho.mqtt)
-    implementation(libs.paho.android)
 
     // Lifecycle - 修正点
     implementation(libs.androidx.lifecycle.service)

@@ -50,7 +50,7 @@ class VisionForegroundService : LifecycleService() {
 
     // 用于节流：记录上次发送消息的时间
     private var lastSendTime = 0L
-    private val MIN_SEND_INTERVAL = 200L // 限制为最高 5 FPS (1000ms/5 = 200ms)
+    private var minSendInterval = 200L // 由 DETECTION_FPS 配置驱动，默认 5 FPS
 
     private val commandListener = object : MqttManager.CommandListener {
         override fun onCommandReceived(command: CommandMessage) {
@@ -70,10 +70,16 @@ class VisionForegroundService : LifecycleService() {
         private const val NOTIFICATION_ID = 1001
         private const val ALERT_NOTIFICATION_ID = 1002
         private const val TAG = "VisionService"
+
+        /** 供 MainActivity 判断相机所有权（避免 CameraX 双组件互杀） */
+        @Volatile
+        var isRunning = false
+            private set
     }
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         settingsManager = SettingsManager(this)
         database = AppDatabase.getDatabase(this)
 
@@ -84,8 +90,10 @@ class VisionForegroundService : LifecycleService() {
 
     private fun initCore() {
         lifecycleScope.launch {
-            val nodeId = settingsManager.nodeId.first()
+            val nodeId = settingsManager.getOrCreateNodeId()
             val brokerUrl = settingsManager.mqttBroker.first()
+            val fps = settingsManager.detectionFps.first().coerceIn(1, 10)
+            minSendInterval = 1000L / fps
 
             visionProcessor = VisionProcessor(this@VisionForegroundService, nodeId)
             mqttManager = MqttManager(this@VisionForegroundService, nodeId)
@@ -99,12 +107,17 @@ class VisionForegroundService : LifecycleService() {
                 }
             }
 
+            // 相机感知不依赖 MQTT 连接：Broker 不可达时仍持续扫描并写入本地缓存
+            startCamera()
+
+            // 心跳与补报任务无条件启动：循环内自带 isConnected 判断，
+            // 首次连接失败后，自动重连成功即可恢复上报
+            startSyncTask()
+            startHeartbeatTask(nodeId)
+
             mqttManager?.connect(brokerUrl) {
                 Log.i(TAG, "MQTT Connected")
                 mqttManager?.subscribeToCommands(commandListener, nodeId)
-                startSyncTask()
-                startHeartbeatTask(nodeId)
-                startCamera()
             }
         }
     }
@@ -122,7 +135,7 @@ class VisionForegroundService : LifecycleService() {
         Log.i(TAG, "Detection policy updated: person=$enablePerson, barcode=$enableBarcode")
     }
 
-    /** 事件留痕：现场扫码/感知事件由调度系统记录审计 */
+    /** 事件留痕（演示级桩：现场扫码/感知事件由调度系统记录审计） */
     private fun handleCaptureEvent(command: CommandMessage) {
         val eventId = command.parameters["event_id"]?.jsonPrimitive?.contentOrNull ?: ""
         Log.i(TAG, "Capture event logged: id=$eventId, target=${command.target}")
@@ -136,6 +149,7 @@ class VisionForegroundService : LifecycleService() {
     }
 
     private fun handleConfigUpdate(command: CommandMessage) {
+        // 演示级桩：正式版在此处热更新节点配置（阈值/FPS/模型版本）
         Log.i(TAG, "Handling dynamic config update: ${command.parameters}")
     }
 
@@ -193,8 +207,15 @@ class VisionForegroundService : LifecycleService() {
                             try {
                                 val originalMsg = Json.decodeFromString<com.ei8z.haandroid.data.model.VisionDetectionMessage>(record.jsonContent)
                                 val historicalMsg = originalMsg.copy(is_historical = true)
-                                mqttManager?.publishMessage("ind/vision/${historicalMsg.node_id}/detection", historicalMsg)
-                                dao.deleteByIds(listOf(record.id))
+                                val payload = Json.encodeToString(historicalMsg)
+                                // QoS1 + Broker 确认送达后才删除缓存，避免瞬时断连丢数据
+                                mqttManager?.publishWithCallback(
+                                    "ind/vision/${historicalMsg.node_id}/detection",
+                                    payload,
+                                    qos = 1
+                                ) {
+                                    dao.deleteByIds(listOf(record.id))
+                                }
                                 delay(100)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Sync record failed", e)
@@ -218,15 +239,16 @@ class VisionForegroundService : LifecycleService() {
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                lifecycleScope.launch {
+                // 推理在后台线程执行，避免主线程阻塞（MediaPipe/TFLite 为同步调用）
+                lifecycleScope.launch(Dispatchers.Default) {
                     try {
                         val currentTime = System.currentTimeMillis()
-                        // 1. 核心处理逻辑
+                        // 1. 核心处理逻辑（ImageProxy 由 processor 全权关闭）
                         val result = visionProcessor?.processImage(imageProxy)
 
                         // 2. 只有在检测到物体且满足节流时间的情况下才发送
                         if (result != null && result.detections.isNotEmpty()) {
-                            if (currentTime - lastSendTime >= MIN_SEND_INTERVAL) {
+                            if (currentTime - lastSendTime >= minSendInterval) {
                                 if (mqttManager?.isConnected() == true) {
                                     mqttManager?.publishMessage("ind/vision/${result.node_id}/detection", result)
                                     lastSendTime = currentTime
@@ -237,14 +259,12 @@ class VisionForegroundService : LifecycleService() {
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Processing error", e)
-                    } finally {
-                        // 3. 无论成功失败，必须关闭 imageProxy 否则预览会卡死
-                        imageProxy.close()
                     }
                 }
             }
 
-            val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+            // 工业场景默认后置摄像头（条码扫描 + 现场人员感知）
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
@@ -289,8 +309,10 @@ class VisionForegroundService : LifecycleService() {
 
     override fun onDestroy() {
         mqttManager?.disconnect()
+        visionProcessor?.release()
         wakeLock?.release()
         cameraExecutor.shutdown()
+        isRunning = false
         super.onDestroy()
     }
 }
