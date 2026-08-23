@@ -4,6 +4,7 @@
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-blue)](https://kotlinlang.org)
 [![minSdk](https://img.shields.io/badge/minSdk-24-green)](https://developer.android.com)
+[![CI](https://github.com/ei8Z/HAAndroid/actions/workflows/android-ci.yml/badge.svg)](https://github.com/ei8Z/HAAndroid/actions)
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ## 它解决什么问题

@@ -10,8 +10,11 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -26,6 +29,7 @@ import com.ei8z.haandroid.data.model.CommandMessage
 import com.ei8z.haandroid.data.model.HeartbeatMessage
 import com.ei8z.haandroid.net.MqttManager
 import com.ei8z.haandroid.vision.VisionProcessor
+import com.ei8z.haandroid.vision.VisionProcessorProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -95,7 +99,10 @@ class VisionForegroundService : LifecycleService() {
             val fps = settingsManager.detectionFps.first().coerceIn(1, 10)
             minSendInterval = 1000L / fps
 
-            visionProcessor = VisionProcessor(this@VisionForegroundService, nodeId)
+            visionProcessor = withContext(Dispatchers.IO) {
+                // 与 Activity 预览共享同一模型实例（引用计数管理）
+                VisionProcessorProvider.acquire(this@VisionForegroundService, nodeId)
+            }
             mqttManager = MqttManager(this@VisionForegroundService, nodeId)
 
             // 收集并应用检测策略（本地默认值 + MQTT 命令动态下发）
@@ -236,6 +243,16 @@ class VisionForegroundService : LifecycleService() {
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(640, 480),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+                )
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
@@ -309,7 +326,8 @@ class VisionForegroundService : LifecycleService() {
 
     override fun onDestroy() {
         mqttManager?.disconnect()
-        visionProcessor?.release()
+        VisionProcessorProvider.release() // 引用计数归零时才真正释放模型
+        visionProcessor = null
         wakeLock?.release()
         cameraExecutor.shutdown()
         isRunning = false

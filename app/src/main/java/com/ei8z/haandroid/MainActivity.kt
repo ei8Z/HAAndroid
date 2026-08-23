@@ -6,12 +6,15 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.Size
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -19,9 +22,11 @@ import com.ei8z.haandroid.data.SettingsManager
 import com.ei8z.haandroid.databinding.ActivityMainBinding
 import com.ei8z.haandroid.service.VisionForegroundService
 import com.ei8z.haandroid.vision.VisionProcessor
+import com.ei8z.haandroid.vision.VisionProcessorProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -93,7 +98,10 @@ class MainActivity : AppCompatActivity() {
             if (visionProcessor != null) return@launch // 已初始化，避免重复绑定
             val settings = SettingsManager(this@MainActivity)
             val nodeId = settings.getOrCreateNodeId()
-            visionProcessor = VisionProcessor(this@MainActivity, nodeId)
+            // 模型加载为 IO 密集操作；与前台服务共享同一实例（引用计数）
+            visionProcessor = withContext(Dispatchers.IO) {
+                VisionProcessorProvider.acquire(this@MainActivity, nodeId)
+            }
             startCameraPreview()
         }
     }
@@ -108,10 +116,20 @@ class MainActivity : AppCompatActivity() {
                 it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
             }
 
-            // 2. 分析配置 (RGBA_8888 方便预览绘制)
+            // 2. 分析配置 (RGBA_8888 方便预览绘制；限制分辨率降低端侧推理负载)
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(640, 480),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+                )
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
@@ -168,7 +186,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
-        visionProcessor?.release()
+        VisionProcessorProvider.release() // 引用计数归零时才真正释放模型
         visionProcessor = null
     }
 }
