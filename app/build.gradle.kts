@@ -17,7 +17,7 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    }
+}
 
     buildTypes {
         release {
@@ -71,6 +71,7 @@ dependencies {
     // TFLite - 修正点
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.gpu)
+    implementation(libs.tensorflow.lite.gpu.api)
 
     // MQTT
     implementation(libs.paho.mqtt)

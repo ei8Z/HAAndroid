@@ -21,8 +21,10 @@ class FaceRecognizer(context: Context) {
             val options = Interpreter.Options()
             try {
                 options.addDelegate(GpuDelegate())
-            } catch (e: Exception) {
-                Log.w("FaceRecognizer", "GPU delegate unavailable, fallback to CPU: ${e.message}")
+            } catch (t: Throwable) {
+                // Throwable 而非 Exception：GPU 缺失/不兼容可能抛 NoClassDefFoundError
+                // 或 UnsatisfiedLinkError（均属 Error），必须一并兜底退回 CPU
+                Log.w("FaceRecognizer", "GPU delegate unavailable, fallback to CPU: $t")
                 options.setNumThreads(4)
             }
             
@@ -52,15 +54,17 @@ class FaceRecognizer(context: Context) {
     }
 
     /**
-     * 提取人脸特征向量 (Embedding)
+     * 提取人脸特征向量 (Embedding)。
+     * 模型不可用时返回空数组（上游会标记为 "err"），不抛异常。
      */
     fun recognize(faceBitmap: Bitmap): FloatArray {
+        val model = interpreter ?: return FloatArray(0)
         val scaledBitmap = Bitmap.createScaledBitmap(faceBitmap, inputSize, inputSize, true)
         val byteBuffer = convertBitmapToByteBuffer(scaledBitmap)
         
         // 使用动态获取的维度
         val output = Array(1) { FloatArray(embeddingSize) }
-        interpreter?.run(byteBuffer, output)
+        model.run(byteBuffer, output)
         
         return output[0]
     }

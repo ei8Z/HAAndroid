@@ -52,6 +52,9 @@ mlkit-barcode = { group = "com.google.mlkit", name = "barcode-scanning", version
 # TFLite (for MobileFaceNet)
 tensorflow-lite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
 tensorflow-lite-gpu = { group = "org.tensorflow", name = "tensorflow-lite-gpu", version.ref = "tensorflowLite" }
+# gpu 2.16 起 GpuDelegateFactory$Options 拆入 gpu-api 工件：
+# 无参 GpuDelegate() 与 GpuDelegate.Options 都引用它，必须显式声明才能打进 APK
+tensorflow-lite-gpu-api = { group = "org.tensorflow", name = "tensorflow-lite-gpu-api", version.ref = "tensorflowLite" }
 
 # MQTT
 paho-mqtt = { group = "org.eclipse.paho", name = "org.eclipse.paho.client.mqttv3", version.ref = "pahoMqtt" }

@@ -109,8 +109,13 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                             val identity = try {
                                 val faceBitmap = cropFace(bitmap, bbox)
                                 val embedding = faceRecognizer.recognize(faceBitmap)
-                                // 上报完整的 Embedding 字符串，供后端匹配身份
-                                embedding.joinToString(",") { String.format("%.4f", it) }
+                                if (embedding.isEmpty()) {
+                                    // 模型不可用（加载失败）：标记为识别错误而非崩溃
+                                    "err"
+                                } else {
+                                    // 上报完整的 Embedding 字符串，供后端匹配身份
+                                    embedding.joinToString(",") { String.format("%.4f", it) }
+                                }
                             } catch (e: Exception) {
                                 Log.e(TAG, "Recognition error", e)
                                 "err"

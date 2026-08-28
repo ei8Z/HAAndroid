@@ -18,6 +18,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.*
 import com.ei8z.haandroid.data.SettingsManager
 import com.ei8z.haandroid.databinding.ActivityMainBinding
 import com.ei8z.haandroid.service.VisionForegroundService
