@@ -21,13 +21,16 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.*
 import com.ei8z.haandroid.data.SettingsManager
+import com.ei8z.haandroid.data.model.VisionDetectionMessage
 import com.ei8z.haandroid.databinding.ActivityMainBinding
+import com.ei8z.haandroid.net.MqttManager
 import com.ei8z.haandroid.service.VisionForegroundService
 import com.ei8z.haandroid.vision.VisionProcessor
 import com.ei8z.haandroid.vision.VisionProcessorProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -35,11 +38,18 @@ import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val PREVIEW_PUBLISH_INTERVAL_MS = 200L // 预览上报节流（最高 5 FPS）
+    }
+
     private lateinit var binding: ActivityMainBinding
     private var visionProcessor: VisionProcessor? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    private var mqttManager: MqttManager? = null
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private var statusPollJob: Job? = null
+    private var lastPreviewSend = 0L
 
     private val requiredPermissions = mutableListOf(
         Manifest.permission.CAMERA
@@ -91,9 +101,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 相机所有权约定（避免 CameraX unbindAll 双组件互杀）：
-     * - 服务未运行：Activity 持有相机做本地预览；
-     * - 服务运行中：相机由前台服务持有，Activity 显示状态横幅。
+     * 两种运行模式（相机所有权互斥）：
+     * - 预览模式（服务未运行）：Activity 持有相机 → 画面检测框 + MQTT 上报同时开启；
+     * - 服务模式（服务运行中）：相机由前台服务持有 → 灭屏持续感知，Activity 显示横幅。
      */
     private fun setupVisionEngine() {
         lifecycleScope.launch {
@@ -103,18 +113,34 @@ class MainActivity : AppCompatActivity() {
                 startStatusPolling()
                 return@launch
             }
-            if (visionProcessor != null) return@launch // 已初始化，避免重复绑定
 
-            // 1. 立即启动相机预览（不等模型加载，消除数秒黑屏）
-            startCameraPreview()
-
-            // 2. 模型后台并行加载（MediaPipe + TFLite 初始化约 2~5s）
+            // ===== 预览模式 =====
             val settings = SettingsManager(this@MainActivity)
             val nodeId = settings.getOrCreateNodeId()
-            visionProcessor = withContext(Dispatchers.IO) {
-                VisionProcessorProvider.acquire(this@MainActivity, nodeId)
+
+            // 1. 相机预览（未绑定才绑定）
+            if (cameraProvider == null) {
+                startCameraPreview()
             }
-            binding.tvStatus.text = "状态: 准备就绪（模型加载完成）"
+
+            // 2. 预览模式 MQTT（检测框 + 上报同时出现）
+            if (mqttManager == null) {
+                val broker = settings.mqttBroker.first()
+                Log.i(TAG, "Preview: connecting MQTT broker=$broker nodeId=$nodeId")
+                mqttManager = MqttManager(nodeId)
+                mqttManager?.connect(broker) {
+                    Log.i(TAG, "Preview: MQTT Connected")
+                    binding.tvStatus.text = "状态: 预览中 · MQTT 已连接（检测框+上报同时开启）"
+                }
+            }
+
+            // 3. 模型后台并行加载（MediaPipe + TFLite 初始化约 2~5s）
+            if (visionProcessor == null) {
+                visionProcessor = withContext(Dispatchers.IO) {
+                    VisionProcessorProvider.acquire(this@MainActivity, nodeId)
+                }
+                binding.tvStatus.text = "状态: 预览中 · 模型加载完成"
+            }
         }
     }
 
@@ -160,6 +186,10 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread {
                             binding.overlayView.setResults(it.detections)
                         }
+                        // 预览模式同步上报：检测框 + MQTT 同时出现
+                        if (it.detections.isNotEmpty()) {
+                            publishPreviewDetection(it)
+                        }
                     }
                 }
             }
@@ -177,10 +207,21 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    /** 预览模式上报（节流 5 FPS；Broker 未连接时丢弃，服务模式接管后由服务上报） */
+    private fun publishPreviewDetection(message: VisionDetectionMessage) {
+        if (mqttManager?.isConnected() != true) return
+        val now = System.currentTimeMillis()
+        if (now - lastPreviewSend < PREVIEW_PUBLISH_INTERVAL_MS) return
+        lastPreviewSend = now
+        mqttManager?.publishMessage("ind/vision/${message.node_id}/detection", message)
+    }
+
     private fun startVisionService() {
-        // 1. 彻底释放 Activity 的相机（等硬件关闭后再让服务重开，避免 HAL 卡死）
+        // 1. 释放预览资源（相机 + 预览 MQTT），避免与服务抢相机/同 clientId 互踢
         cameraProvider?.unbindAll()
         cameraProvider = null
+        mqttManager?.disconnect()
+        mqttManager = null
         binding.tvServiceRunning.visibility = View.VISIBLE
         binding.tvStatus.text = "状态: 后台服务启动中…"
 
@@ -202,7 +243,7 @@ class MainActivity : AppCompatActivity() {
         stopService(intent)
         binding.tvServiceRunning.visibility = View.GONE
         binding.tvStatus.text = "状态: 已停止后台服务"
-        // 等服务销毁（isRunning=false）后恢复本地预览
+        // 等服务销毁（isRunning=false）后恢复预览模式
         lifecycleScope.launch {
             delay(500)
             setupVisionEngine()
@@ -229,6 +270,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         statusPollJob?.cancel()
         cameraExecutor.shutdown()
+        mqttManager?.disconnect()
+        mqttManager = null
         VisionProcessorProvider.release() // 引用计数归零时才真正释放模型
         visionProcessor = null
         cameraProvider = null

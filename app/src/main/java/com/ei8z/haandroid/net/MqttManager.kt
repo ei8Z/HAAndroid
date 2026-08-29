@@ -1,6 +1,5 @@
 package com.ei8z.haandroid.net
 
-import android.content.Context
 import android.util.Log
 import com.ei8z.haandroid.data.model.CommandMessage
 import kotlinx.coroutines.CoroutineScope
@@ -11,10 +10,11 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-class MqttManager(private val context: Context, private val nodeId: String) {
+class MqttManager(private val nodeId: String) {
 
     private var mqttClient: MqttAsyncClient? = null
-    
+    private var commandListener: CommandListener? = null
+
     @PublishedApi
     internal val TAG = "MqttManager"
 
@@ -29,14 +29,44 @@ class MqttManager(private val context: Context, private val nodeId: String) {
             mqttClient = MqttAsyncClient(brokerUrl, "ind_vision_$nodeId", MemoryPersistence())
             val options = MqttConnectOptions().apply {
                 isCleanSession = false
-                isAutomaticReconnect = true   // 断线自动重连（配合 CleanSession=false 补报）
+                isAutomaticReconnect = true
                 connectionTimeout = 10
                 keepAliveInterval = 60
                 // 设置遗言 (LWT)
                 setWill(statusTopic, "offline".toByteArray(Charsets.UTF_8), 1, true)
             }
 
-            mqttClient?.connect(options, null, object : IMqttActionListener {
+            val client = mqttClient ?: return
+
+            // 回调必须在 connect 之前注册（Paho 要求），否则下行消息无法分发
+            client.setCallback(object : MqttCallbackExtended {
+                override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+                    Log.i(TAG, "connectComplete reconnect=$reconnect")
+                    resubscribe()
+                }
+
+                override fun connectionLost(cause: Throwable?) {
+                    Log.w(TAG, "Connection lost, auto-reconnect enabled: ${cause?.message}")
+                }
+
+                override fun messageArrived(topic: String, message: MqttMessage) {
+                    Log.d(TAG, "Message arrived on topic: $topic")
+                    when {
+                        topic.startsWith("ind/command/") || topic == "ind/vision/$nodeId/config" -> {
+                            try {
+                                val cmd = Json.decodeFromString<CommandMessage>(message.toString())
+                                commandListener?.onCommandReceived(cmd)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to parse command: $message", e)
+                            }
+                        }
+                    }
+                }
+
+                override fun deliveryComplete(token: IMqttDeliveryToken?) = Unit
+            })
+
+            client.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
                     Log.d(TAG, "MQTT Connected")
                     publishStatus("online")
@@ -48,59 +78,25 @@ class MqttManager(private val context: Context, private val nodeId: String) {
                 }
             })
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "connect error", e)
         }
     }
 
     fun subscribeToCommands(listener: CommandListener, nodeId: String) {
-        mqttClient?.setCallback(object : MqttCallbackExtended {
-            override fun messageArrived(topic: String, message: MqttMessage) {
-                Log.d(TAG, "Message arrived on topic: $topic")
-                when {
-                    topic.startsWith("ind/command/") || topic == "ind/vision/$nodeId/config" -> {
-                        try {
-                            val cmd = Json.decodeFromString<CommandMessage>(message.toString())
-                            listener.onCommandReceived(cmd)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to parse command", e)
-                        }
-                    }
-                }
-            }
+        commandListener = listener
+        resubscribe()
+    }
 
-            override fun connectionLost(cause: Throwable?) {
-                // isAutomaticReconnect=true 时由 Paho 自动重连，这里仅记录
-                Log.w(TAG, "Connection lost, auto-reconnect enabled: ${cause?.message}")
-            }
-
-            override fun deliveryComplete(token: IMqttDeliveryToken?) {}
-
-            override fun connectComplete(reconnect: Boolean, serverURI: String?) {
-                if (reconnect) {
-                    Log.i(TAG, "Reconnected, triggering offline data sync")
-                }
-                // 重新订阅
-                try {
-                    mqttClient?.subscribe(arrayOf(
-                        "ind/command/#",
-                        "ind/vision/$nodeId/config"
-                    ), intArrayOf(1, 1))
-                } catch (e: MqttException) {
-                    Log.e(TAG, "Error resubscribing", e)
-                }
-            }
-        })
-
-        // 初始订阅
-        if (mqttClient?.isConnected == true) {
-            try {
-                mqttClient?.subscribe(arrayOf(
-                    "ind/command/#",
-                    "ind/vision/$nodeId/config"
-                ), intArrayOf(1, 1))
-            } catch (e: MqttException) {
-                Log.e(TAG, "Error subscribing", e)
-            }
+    private fun resubscribe() {
+        if (mqttClient?.isConnected != true) return
+        try {
+            mqttClient?.subscribe(
+                arrayOf("ind/command/#", "ind/vision/$nodeId/config"),
+                intArrayOf(1, 1)
+            )
+            Log.i(TAG, "Subscribed: ind/command/#")
+        } catch (e: MqttException) {
+            Log.e(TAG, "Error subscribing", e)
         }
     }
 
@@ -116,7 +112,6 @@ class MqttManager(private val context: Context, private val nodeId: String) {
             val jsonString = if (message is String) {
                 message
             } else {
-                // 这里编译器现在能找到具体的 Serializer 了
                 Json.encodeToString(message)
             }
             publish(topic, jsonString, qos)
@@ -158,7 +153,7 @@ class MqttManager(private val context: Context, private val nodeId: String) {
     }
 
     fun disconnect() {
-        if(mqttClient?.isConnected == true) {
+        if (mqttClient?.isConnected == true) {
             publishStatus("offline")
             mqttClient?.disconnect()
         }

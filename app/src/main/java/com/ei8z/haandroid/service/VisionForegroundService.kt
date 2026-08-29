@@ -114,7 +114,7 @@ class VisionForegroundService : LifecycleService() {
                     VisionProcessorProvider.acquire(this@VisionForegroundService, nodeId)
                 }
                 Log.i(TAG, "initCore: processor ready")
-                mqttManager = MqttManager(this@VisionForegroundService, nodeId)
+                mqttManager = MqttManager(nodeId)
 
                 // 收集并应用检测策略（本地默认值 + MQTT 命令动态下发）
                 launch {
