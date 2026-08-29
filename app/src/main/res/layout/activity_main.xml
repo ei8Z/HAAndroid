@@ -16,6 +16,23 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- 后台服务运行横幅（服务接管相机后显示，避免画面冻结误解） -->
+    <TextView
+        android:id="@+id/tvServiceRunning"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="#CC000000"
+        android:padding="16dp"
+        android:text="后台感知运行中\n相机由前台服务持有"
+        android:textColor="#FFFFFF"
+        android:textSize="18sp"
+        android:gravity="center"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
     <!-- 控制面板 -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -25,12 +42,36 @@
         android:padding="16dp"
         app:layout_constraintBottom_toBottomOf="parent">
 
+        <!-- Broker 配置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/etBroker"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="MQTT Broker (tcp://192.168.x.x:1883)"
+                android:inputType="textUri"
+                android:textColor="@android:color/white"
+                android:textColorHint="#80FFFFFF" />
+
+            <Button
+                android:id="@+id/btnSaveBroker"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="保存" />
+        </LinearLayout>
+
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="状态: 准备就绪"
-            android:textColor="@android:color/white" />
+            android:textColor="@android:color/white"
+            android:layout_marginTop="4dp" />
 
         <LinearLayout
             android:layout_width="match_parent"

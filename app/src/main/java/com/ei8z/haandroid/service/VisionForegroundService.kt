@@ -49,6 +49,7 @@ class VisionForegroundService : LifecycleService() {
     private lateinit var database: AppDatabase
     private var mqttManager: MqttManager? = null
     private var visionProcessor: VisionProcessor? = null
+    private var cameraProvider: ProcessCameraProvider? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -78,6 +79,11 @@ class VisionForegroundService : LifecycleService() {
         /** 供 MainActivity 判断相机所有权（避免 CameraX 双组件互杀） */
         @Volatile
         var isRunning = false
+            private set
+
+        /** MQTT 连接状态（供 Activity 界面轮询显示） */
+        @Volatile
+        var isConnected = false
             private set
     }
 
@@ -114,17 +120,33 @@ class VisionForegroundService : LifecycleService() {
                 }
             }
 
-            // 相机感知不依赖 MQTT 连接：Broker 不可达时仍持续扫描并写入本地缓存
-            startCamera()
+            // 1. MQTT 优先连接（先确认网络链路，相机随后启动）
+            mqttManager?.connect(brokerUrl) {
+                Log.i(TAG, "MQTT Connected")
+                isConnected = true
+                mqttManager?.subscribeToCommands(commandListener, nodeId)
+            }
 
             // 心跳与补报任务无条件启动：循环内自带 isConnected 判断，
             // 首次连接失败后，自动重连成功即可恢复上报
             startSyncTask()
             startHeartbeatTask(nodeId)
+            startStatusReporter()
 
-            mqttManager?.connect(brokerUrl) {
-                Log.i(TAG, "MQTT Connected")
-                mqttManager?.subscribeToCommands(commandListener, nodeId)
+            // 2. 相机延迟启动：给 Activity 端相机释放留出时间，避免 HAL 重开卡死
+            launch {
+                delay(400)
+                startCamera()
+            }
+        }
+    }
+
+    /** 每 2 秒同步连接状态（Activity 界面轮询 + 心跳之间的中间粒度） */
+    private fun startStatusReporter() {
+        lifecycleScope.launch {
+            while (isActive) {
+                isConnected = mqttManager?.isConnected() == true
+                delay(2000)
             }
         }
     }
@@ -238,7 +260,8 @@ class VisionForegroundService : LifecycleService() {
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
+            val provider = cameraProviderFuture.get()
+            cameraProvider = provider
 
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -275,18 +298,32 @@ class VisionForegroundService : LifecycleService() {
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Processing error", e)
+                        /*Log.e(TAG, "Processing error", e)*/
                     }
                 }
             }
 
             // 工业场景默认后置摄像头（条码扫描 + 现场人员感知）
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
-            } catch (e: Exception) {
-                Log.e(TAG, "Camera binding failed", e)
+
+            // 绑定重试：部分设备重开相机偶发失败，稍候重试（bindToLifecycle 需主线程）
+            lifecycleScope.launch {
+                for (attempt in 1..3) {
+                    try {
+                        provider.unbindAll()
+                        provider.bindToLifecycle(
+                            this@VisionForegroundService,
+                            cameraSelector,
+                            imageAnalysis
+                        )
+                        Log.i(TAG, "Camera bound (attempt $attempt)")
+                        return@launch
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Camera binding failed (attempt $attempt)", e)
+                        delay(800)
+                    }
+                }
+                Log.e(TAG, "Camera binding failed after 3 attempts")
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -326,11 +363,14 @@ class VisionForegroundService : LifecycleService() {
 
     override fun onDestroy() {
         mqttManager?.disconnect()
+        cameraProvider?.unbindAll()
+        cameraProvider = null
         VisionProcessorProvider.release() // 引用计数归零时才真正释放模型
         visionProcessor = null
         wakeLock?.release()
         cameraExecutor.shutdown()
         isRunning = false
+        isConnected = false
         super.onDestroy()
     }
 }

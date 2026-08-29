@@ -36,7 +36,7 @@ class SettingsManager(private val context: Context) {
     }
 
     val mqttBroker: Flow<String> = context.dataStore.data.map { preferences ->
-        preferences[MQTT_BROKER] ?: "tcp://192.168.0.3:1883"
+        preferences[MQTT_BROKER] ?: "tcp://192.168.1.2:1883"
     }
 
     val detectionFps: Flow<Int> = context.dataStore.data.map { preferences ->
