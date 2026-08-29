@@ -28,7 +28,6 @@ import com.ei8z.haandroid.vision.VisionProcessorProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -66,7 +65,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         setupUI()
-        loadSettings()
         checkAndRequestPermissions()
     }
 
@@ -77,21 +75,6 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnStopService.setOnClickListener {
             stopVisionService()
-        }
-
-        binding.btnSaveBroker.setOnClickListener {
-            val broker = binding.etBroker.text.toString().trim()
-            lifecycleScope.launch {
-                SettingsManager(this@MainActivity).updateMqttBroker(broker)
-                Toast.makeText(this@MainActivity, "Broker 已保存，重启服务生效", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun loadSettings() {
-        lifecycleScope.launch {
-            val settings = SettingsManager(this@MainActivity)
-            binding.etBroker.setText(settings.mqttBroker.first())
         }
     }
 

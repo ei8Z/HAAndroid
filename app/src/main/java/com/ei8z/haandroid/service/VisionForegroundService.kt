@@ -100,43 +100,54 @@ class VisionForegroundService : LifecycleService() {
 
     private fun initCore() {
         lifecycleScope.launch {
-            val nodeId = settingsManager.getOrCreateNodeId()
-            val brokerUrl = settingsManager.mqttBroker.first()
-            val fps = settingsManager.detectionFps.first().coerceIn(1, 10)
-            minSendInterval = 1000L / fps
+            try {
+                Log.i(TAG, "initCore: start")
+                val nodeId = settingsManager.getOrCreateNodeId()
+                Log.i(TAG, "initCore: nodeId=$nodeId")
+                val brokerUrl = settingsManager.mqttBroker.first()
+                Log.i(TAG, "initCore: broker=$brokerUrl")
+                val fps = settingsManager.detectionFps.first().coerceIn(1, 10)
+                minSendInterval = 1000L / fps
 
-            visionProcessor = withContext(Dispatchers.IO) {
-                // 与 Activity 预览共享同一模型实例（引用计数管理）
-                VisionProcessorProvider.acquire(this@VisionForegroundService, nodeId)
-            }
-            mqttManager = MqttManager(this@VisionForegroundService, nodeId)
-
-            // 收集并应用检测策略（本地默认值 + MQTT 命令动态下发）
-            launch {
-                settingsManager.detectionPolicy.collect { policy ->
-                    visionProcessor?.enablePersonDetection = policy.enablePerson
-                    visionProcessor?.enableBarcodeScanning = policy.enableBarcode
-                    Log.i(TAG, "Detection policy applied: $policy")
+                visionProcessor = withContext(Dispatchers.IO) {
+                    // 与 Activity 预览共享同一模型实例（引用计数管理）
+                    VisionProcessorProvider.acquire(this@VisionForegroundService, nodeId)
                 }
-            }
+                Log.i(TAG, "initCore: processor ready")
+                mqttManager = MqttManager(this@VisionForegroundService, nodeId)
 
-            // 1. MQTT 优先连接（先确认网络链路，相机随后启动）
-            mqttManager?.connect(brokerUrl) {
-                Log.i(TAG, "MQTT Connected")
-                isConnected = true
-                mqttManager?.subscribeToCommands(commandListener, nodeId)
-            }
+                // 收集并应用检测策略（本地默认值 + MQTT 命令动态下发）
+                launch {
+                    settingsManager.detectionPolicy.collect { policy ->
+                        visionProcessor?.enablePersonDetection = policy.enablePerson
+                        visionProcessor?.enableBarcodeScanning = policy.enableBarcode
+                        Log.i(TAG, "Detection policy applied: $policy")
+                    }
+                }
 
-            // 心跳与补报任务无条件启动：循环内自带 isConnected 判断，
-            // 首次连接失败后，自动重连成功即可恢复上报
-            startSyncTask()
-            startHeartbeatTask(nodeId)
-            startStatusReporter()
+                // 1. MQTT 优先连接（先确认网络链路，相机随后启动）
+                Log.i(TAG, "initCore: connecting MQTT...")
+                mqttManager?.connect(brokerUrl) {
+                    Log.i(TAG, "MQTT Connected")
+                    isConnected = true
+                    mqttManager?.subscribeToCommands(commandListener, nodeId)
+                }
 
-            // 2. 相机延迟启动：给 Activity 端相机释放留出时间，避免 HAL 重开卡死
-            launch {
-                delay(400)
-                startCamera()
+                // 心跳与补报任务无条件启动：循环内自带 isConnected 判断，
+                // 首次连接失败后，自动重连成功即可恢复上报
+                startSyncTask()
+                startHeartbeatTask(nodeId)
+                startStatusReporter()
+
+                // 2. 相机延迟启动：给 Activity 端相机释放留出时间，避免 HAL 重开卡死
+                launch {
+                    delay(400)
+                    startCamera()
+                }
+                Log.i(TAG, "initCore: done")
+            } catch (t: Throwable) {
+                // 任何一步失败都不能让整个感知链路静默死亡
+                Log.e(TAG, "initCore failed", t)
             }
         }
     }
@@ -298,7 +309,7 @@ class VisionForegroundService : LifecycleService() {
                             }
                         }
                     } catch (e: Exception) {
-                        /*Log.e(TAG, "Processing error", e)*/
+                        Log.e(TAG, "Processing error", e)
                     }
                 }
             }

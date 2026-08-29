@@ -43,8 +43,9 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
 
     private var frameIndex = 0L
 
-    // 帧缓冲池（M10）：旋转输出与裁剪输出的位图跨帧复用，避免每帧分配
-    private var frameBuffer: Bitmap? = null
+    // 裁剪输出缓冲跨帧复用（仅被 FaceRecognizer 内部拷贝消费，无回收风险）。
+    // 注意：旋转缓冲不再池化——MediaPipe 的 MPImage.close() 会 recycle 源位图
+    // （BitmapImageContainer.close → bitmap.recycle），池化会拿到已回收的位图。
     private var cropBuffer: Bitmap? = null
 
     init {
@@ -87,7 +88,7 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                 val rawBitmap = imageProxy.toBitmap()
                 val bitmap = rotate(rawBitmap, rotationDegrees.toFloat())
                 if (bitmap !== rawBitmap) {
-                    // 旋转结果已进入池化缓冲，CameraX 新分配的源图可立即回收
+                    // 旋转结果为新分配位图，CameraX 源图可立即回收
                     rawBitmap.recycle()
                 }
                 // degrees==0 时 bitmap 即 rawBitmap：不主动回收
@@ -98,7 +99,22 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
 
                 val allDetections = mutableListOf<Detection>()
 
-                // 1. 人员感知（可被 MQTT 策略关闭）
+                // 1. 条码/二维码解码（每 2 帧一次，节省端侧算力；可被 MQTT 策略关闭）
+                //    必须在人员感知之前执行：MediaPipe mpImage.close() 会 recycle 源位图
+                if (enableBarcodeScanning && frameIndex % 2 == 0L) {
+                    barcodeScanner.scan(bitmap).forEach { scan ->
+                        allDetections.add(Detection(
+                            type = "barcode",
+                            value = scan.value,
+                            format = scan.format,
+                            confidence = null, // 条码解码无置信度语义
+                            bbox = scan.normalizedBox
+                        ))
+                    }
+                }
+
+                // 2. 人员感知（可被 MQTT 策略关闭）。
+                //    mpImage.close() 会回收 bitmap，因此这是对 bitmap 的最后一次使用
                 if (enablePersonDetection) {
                     val mpImage = BitmapImageBuilder(bitmap).build()
                     try {
@@ -136,22 +152,11 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                             ))
                         }
                     } finally {
-                        mpImage.close() // 释放 GPU delegate 持有的原生句柄
+                        // MediaPipe 会 recycle 源位图（BitmapImageContainer.close）
+                        mpImage.close()
                     }
                 }
 
-                // 2. 条码/二维码解码（每 2 帧一次，节省端侧算力；可被 MQTT 策略关闭）
-                if (enableBarcodeScanning && frameIndex % 2 == 0L) {
-                    barcodeScanner.scan(bitmap).forEach { scan ->
-                        allDetections.add(Detection(
-                            type = "barcode",
-                            value = scan.value,
-                            format = scan.format,
-                            confidence = null, // 条码解码无置信度语义
-                            bbox = scan.normalizedBox
-                        ))
-                    }
-                }
                 frameIndex++
 
                 VisionDetectionMessage(
@@ -170,20 +175,13 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
     }
 
     /**
-     * 旋转到位图缓冲：目标位图从池中复用（90/270° 宽高互换）。
-     * 串行调用（Mutex 保证），池化缓冲无并发风险。
+     * 旋转到新位图（每帧分配，不做池化）：
+     * MediaPipe 关闭 MPImage 会 recycle 源位图，池化会导致复用已回收位图。
      */
     private fun rotate(bitmap: Bitmap, degrees: Float): Bitmap {
         if (degrees == 0f) return bitmap
-        val swap = degrees % 180f != 0f
-        val outWidth = if (swap) bitmap.height else bitmap.width
-        val outHeight = if (swap) bitmap.width else bitmap.height
-        val dst = frameBuffer?.takeIf { it.width == outWidth && it.height == outHeight }
-            ?: Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
-                .also { frameBuffer = it }
         val matrix = Matrix().apply { postRotate(degrees) }
-        Canvas(dst).drawBitmap(bitmap, matrix, null)
-        return dst
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
     private fun cropFace(original: Bitmap, bbox: RectF): Bitmap {
