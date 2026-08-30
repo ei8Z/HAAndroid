@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var visionProcessor: VisionProcessor? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    private var previewImageAnalysis: ImageAnalysis? = null
     private var mqttManager: MqttManager? = null
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private var statusPollJob: Job? = null
@@ -170,6 +171,7 @@ class MainActivity : AppCompatActivity() {
                         .build()
                 )
                 .build()
+            previewImageAnalysis = imageAnalysis
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 // 推理为同步调用，必须放后台线程，避免主线程 ANR
@@ -217,9 +219,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVisionService() {
-        // 1. 释放预览资源（相机 + 预览 MQTT），避免与服务抢相机/同 clientId 互踢
+        // 1. 先停帧流：clearAnalyzer 非阻塞，避免 unbindAll 等待在途帧
+        Log.i(TAG, "startVisionService: clearing analyzer...")
+        previewImageAnalysis?.clearAnalyzer()
+        previewImageAnalysis = null
+
+        // 2. 释放预览相机
+        Log.i(TAG, "startVisionService: unbinding camera...")
         cameraProvider?.unbindAll()
+        Log.i(TAG, "startVisionService: camera unbound")
         cameraProvider = null
+
+        // 3. 断开预览 MQTT（同 clientId 避免与服务互踢）
         mqttManager?.disconnect()
         mqttManager = null
         binding.tvServiceRunning.visibility = View.VISIBLE
@@ -227,6 +238,7 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             delay(500) // 给相机硬件关闭留出时间
+            Log.i(TAG, "startVisionService: starting foreground service...")
             val intent = Intent(this@MainActivity, VisionForegroundService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)

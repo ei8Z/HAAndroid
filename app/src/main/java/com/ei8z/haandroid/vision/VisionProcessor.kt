@@ -18,6 +18,7 @@ import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facedetector.FaceDetector
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 工业现场视觉处理流水线
@@ -36,6 +37,13 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
     private val faceRecognizer = FaceRecognizer(context)
     private val barcodeScanner = BarcodeScanner()
     private val processingMutex = Mutex()
+
+    companion object {
+        /** 整帧处理超时：任何子环节挂起都不能永久占用 Mutex 与 ImageProxy */
+        private const val PROCESS_TIMEOUT_MS = 2000L
+        /** 单次条码解码超时：ML Kit 回调不返回时降级为空结果 */
+        private const val BARCODE_TIMEOUT_MS = 500L
+    }
 
     /** 策略开关，由 VisionForegroundService 根据本地配置 + MQTT 命令同步 */
     @Volatile var enablePersonDetection = true
@@ -82,7 +90,10 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
             return null
         }
 
-        return processingMutex.withLock {
+        // 整帧超时兜底：withTimeoutOrNull 超时后取消协程，
+        // withLock/finally 会释放互斥锁并关闭 ImageProxy，防止主线程 unbindAll 永久等待
+        return withTimeoutOrNull(PROCESS_TIMEOUT_MS) {
+            processingMutex.withLock {
             try {
                 val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                 val rawBitmap = imageProxy.toBitmap()
@@ -100,9 +111,13 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                 val allDetections = mutableListOf<Detection>()
 
                 // 1. 条码/二维码解码（每 2 帧一次，节省端侧算力；可被 MQTT 策略关闭）
-                //    必须在人员感知之前执行：MediaPipe mpImage.close() 会 recycle 源位图
+                //    必须在人员感知之前执行：MediaPipe mpImage.close() 会 recycle 源位图。
+                //    带超时：ML Kit 回调不返回时降级为空结果，避免永久占用 Mutex
                 if (enableBarcodeScanning && frameIndex % 2 == 0L) {
-                    barcodeScanner.scan(bitmap).forEach { scan ->
+                    val scans = withTimeoutOrNull(BARCODE_TIMEOUT_MS) {
+                        barcodeScanner.scan(bitmap)
+                    } ?: emptyList()
+                    scans.forEach { scan ->
                         allDetections.add(Detection(
                             type = "barcode",
                             value = scan.value,
@@ -170,6 +185,7 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                 null
             } finally {
                 imageProxy.close()
+            }
             }
         }
     }
