@@ -315,7 +315,17 @@ class VisionForegroundService : LifecycleService() {
             }
 
             // 工业场景默认后置摄像头（条码扫描 + 现场人员感知）
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            // G2: 如果后摄不可用，降级到前摄
+            val cameraSelector = if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            } else if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
+                Log.w(TAG, "Back camera unavailable, falling back to front camera")
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            } else {
+                Log.e(TAG, "No cameras available, service stopping...")
+                stopSelf()
+                return@addListener
+            }
 
             // 绑定重试：部分设备重开相机偶发失败，稍候重试（bindToLifecycle 需主线程）
             lifecycleScope.launch {

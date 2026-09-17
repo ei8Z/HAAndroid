@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">工业视觉感知</string>
+    <string name="status_service_running">状态: 后台服务运行中</string>
+    <string name="status_previewing_mqtt_connected">状态: 预览中 · MQTT 已连接（检测框+上报同时开启）</string>
+    <string name="status_model_loaded">状态: 预览中 · 模型加载完成</string>
+    <string name="status_service_starting">状态: 后台服务启动中…</string>
+    <string name="status_service_stopped">状态: 已停止后台服务</string>
+    <string name="status_service_connected">状态: 后台运行中 · MQTT 已连接</string>
+    <string name="status_service_disconnected">状态: 后台运行中 · MQTT 未连接（检查 Broker 地址/端口映射）</string>
+    <string name="permission_denied_toast">需要相机权限来预览识别结果</string>
 </resources>

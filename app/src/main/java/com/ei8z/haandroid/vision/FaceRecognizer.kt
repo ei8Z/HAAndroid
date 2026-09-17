@@ -12,36 +12,58 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 
 class FaceRecognizer(context: Context) {
+    companion object {
+        private const val TAG = "FaceRecognizer"
+        private const val MODEL_PATH = "mobilefacenet.tflite"
+        private const val INPUT_SIZE = 112
+        private const val CPU_THREADS = 4
+        private const val NORM_MEAN = 127.5f
+        private const val NORM_STD = 128f
+    }
+
     private var interpreter: Interpreter? = null
-    private val inputSize = 112 
-    private var embeddingSize = 192 // 默认改为 192
+    private var embeddingSize = 192 // 默认值，加载后根据模型输出动态调整
+    private var isGpuActive = false
 
     init {
         try {
-            val options = Interpreter.Options()
-            try {
-                options.addDelegate(GpuDelegate())
-            } catch (t: Throwable) {
-                // Throwable 而非 Exception：GPU 缺失/不兼容可能抛 NoClassDefFoundError
-                // 或 UnsatisfiedLinkError（均属 Error），必须一并兜底退回 CPU
-                Log.w("FaceRecognizer", "GPU delegate unavailable, fallback to CPU: $t")
-                options.setNumThreads(4)
+            val modelBuffer = loadModelFile(context.assets, MODEL_PATH)
+            val (builtInterpreter, gpuUsed) = buildInterpreter(modelBuffer)
+            interpreter = builtInterpreter
+            isGpuActive = gpuUsed
+
+            // 动态检测模型输出维度
+            interpreter?.getOutputTensor(0)?.shape()?.let { shape ->
+                if (shape.size >= 2) {
+                    embeddingSize = shape[1]
+                    Log.i(TAG, "Model loaded: isGpuActive=$isGpuActive, embeddingSize=$embeddingSize")
+                }
             }
-            
-            val modelBuffer = loadModelFile(context.assets, "mobilefacenet.tflite")
-            interpreter = Interpreter(modelBuffer, options)
-            
-            // 动态检测模型输出维度，防止以后再次报错
-            val outputShape = interpreter?.getOutputTensor(0)?.shape()
-            if (outputShape != null && outputShape.size >= 2) {
-                embeddingSize = outputShape[1]
-                Log.i("FaceRecognizer", "Detected model embedding size: $embeddingSize")
-            }
-            
-            Log.i("FaceRecognizer", "MobileFaceNet model loaded successfully")
         } catch (e: Exception) {
-            Log.e("FaceRecognizer", "Error loading model", e)
+            Log.e(TAG, "Critical error during FaceRecognizer initialization", e)
         }
+    }
+
+    private fun buildInterpreter(buffer: ByteBuffer): Pair<Interpreter?, Boolean> {
+        // 第一段：尝试 GPU
+        runCatching {
+            val gpuOptions = Interpreter.Options().apply {
+                addDelegate(GpuDelegate())
+            }
+            return Interpreter(buffer, gpuOptions) to true
+        }.onFailure {
+            Log.w(TAG, "GPU path failed (delegate or interpreter), retry on CPU: $it")
+        }
+
+        // 第二段：纯 CPU
+        return runCatching {
+            val cpuOptions = Interpreter.Options().apply {
+                setNumThreads(CPU_THREADS)
+            }
+            Interpreter(buffer, cpuOptions) to false
+        }.onFailure {
+            Log.e(TAG, "CPU path failed too", it)
+        }.getOrNull() ?: (null to false)
     }
 
     private fun loadModelFile(assetManager: AssetManager, modelPath: String): ByteBuffer {
@@ -53,33 +75,33 @@ class FaceRecognizer(context: Context) {
         return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
     }
 
-    /**
-     * 提取人脸特征向量 (Embedding)。
-     * 模型不可用时返回空数组（上游会标记为 "err"），不抛异常。
-     */
     fun recognize(faceBitmap: Bitmap): FloatArray {
         val model = interpreter ?: return FloatArray(0)
-        val scaledBitmap = Bitmap.createScaledBitmap(faceBitmap, inputSize, inputSize, true)
+        val scaledBitmap = Bitmap.createScaledBitmap(faceBitmap, INPUT_SIZE, INPUT_SIZE, true)
         val byteBuffer = convertBitmapToByteBuffer(scaledBitmap)
         
-        // 使用动态获取的维度
         val output = Array(1) { FloatArray(embeddingSize) }
-        model.run(byteBuffer, output)
+        try {
+            model.run(byteBuffer, output)
+        } catch (e: Exception) {
+            Log.e(TAG, "Inference failed", e)
+            return FloatArray(0)
+        }
         
         return output[0]
     }
 
     private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
-        val byteBuffer = ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3)
+        val byteBuffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
         byteBuffer.order(ByteOrder.nativeOrder())
-        val intValues = IntArray(inputSize * inputSize)
+        val intValues = IntArray(INPUT_SIZE * INPUT_SIZE)
         bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         
         for (pixelValue in intValues) {
             // MobileFaceNet 标准归一化: (x - 127.5) / 128
-            byteBuffer.putFloat(((pixelValue shr 16 and 0xFF) - 127.5f) / 128f)
-            byteBuffer.putFloat(((pixelValue shr 8 and 0xFF) - 127.5f) / 128f)
-            byteBuffer.putFloat(((pixelValue and 0xFF) - 127.5f) / 128f)
+            byteBuffer.putFloat(((pixelValue shr 16 and 0xFF) - NORM_MEAN) / NORM_STD)
+            byteBuffer.putFloat(((pixelValue shr 8 and 0xFF) - NORM_MEAN) / NORM_STD)
+            byteBuffer.putFloat(((pixelValue and 0xFF) - NORM_MEAN) / NORM_STD)
         }
         return byteBuffer
     }

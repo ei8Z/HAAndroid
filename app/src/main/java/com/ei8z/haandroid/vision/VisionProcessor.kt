@@ -43,6 +43,8 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
         private const val PROCESS_TIMEOUT_MS = 2000L
         /** 单次条码解码超时：ML Kit 回调不返回时降级为空结果 */
         private const val BARCODE_TIMEOUT_MS = 500L
+        /** 条码扫描频率：每隔多少帧扫描一次，节省端侧算力 */
+        private const val BARCODE_SCAN_INTERVAL = 2L
     }
 
     /** 策略开关，由 VisionForegroundService 根据本地配置 + MQTT 命令同步 */
@@ -113,7 +115,7 @@ class VisionProcessor(private val context: Context, private val nodeId: String) 
                 // 1. 条码/二维码解码（每 2 帧一次，节省端侧算力；可被 MQTT 策略关闭）
                 //    必须在人员感知之前执行：MediaPipe mpImage.close() 会 recycle 源位图。
                 //    带超时：ML Kit 回调不返回时降级为空结果，避免永久占用 Mutex
-                if (enableBarcodeScanning && frameIndex % 2 == 0L) {
+                if (enableBarcodeScanning && frameIndex % BARCODE_SCAN_INTERVAL == 0L) {
                     val scans = withTimeoutOrNull(BARCODE_TIMEOUT_MS) {
                         barcodeScanner.scan(bitmap)
                     } ?: emptyList()

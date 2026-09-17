@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         if (permissions.all { it.value }) {
             setupVisionEngine()
         } else {
-            Toast.makeText(this, "需要相机权限来预览识别结果", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.permission_denied_toast), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -110,7 +110,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             if (VisionForegroundService.isRunning) {
                 binding.tvServiceRunning.visibility = View.VISIBLE
-                binding.tvStatus.text = "状态: 后台服务运行中"
+                binding.tvStatus.text = getString(R.string.status_service_running)
                 startStatusPolling()
                 return@launch
             }
@@ -131,7 +131,7 @@ class MainActivity : AppCompatActivity() {
                 mqttManager = MqttManager(nodeId)
                 mqttManager?.connect(broker) {
                     Log.i(TAG, "Preview: MQTT Connected")
-                    binding.tvStatus.text = "状态: 预览中 · MQTT 已连接（检测框+上报同时开启）"
+                    binding.tvStatus.text = getString(R.string.status_previewing_mqtt_connected)
                 }
             }
 
@@ -140,7 +140,7 @@ class MainActivity : AppCompatActivity() {
                 visionProcessor = withContext(Dispatchers.IO) {
                     VisionProcessorProvider.acquire(this@MainActivity, nodeId)
                 }
-                binding.tvStatus.text = "状态: 预览中 · 模型加载完成"
+                binding.tvStatus.text = getString(R.string.status_model_loaded)
             }
         }
     }
@@ -197,7 +197,19 @@ class MainActivity : AppCompatActivity() {
             }
 
             // 工业场景默认后置摄像头（条码/二维码扫描 + 现场人员感知）
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            // G2: 如果后摄不可用，降级到前摄并提示
+            val cameraSelector = if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            } else if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
+                Log.w(TAG, "Back camera unavailable, falling back to front camera")
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            } else {
+                Log.e(TAG, "No cameras available")
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "设备无可用摄像头", Toast.LENGTH_LONG).show()
+                }
+                return@addListener
+            }
 
             try {
                 provider.unbindAll()
@@ -234,7 +246,7 @@ class MainActivity : AppCompatActivity() {
         mqttManager?.disconnect()
         mqttManager = null
         binding.tvServiceRunning.visibility = View.VISIBLE
-        binding.tvStatus.text = "状态: 后台服务启动中…"
+        binding.tvStatus.text = getString(R.string.status_service_starting)
 
         lifecycleScope.launch {
             delay(500) // 给相机硬件关闭留出时间
@@ -254,7 +266,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, VisionForegroundService::class.java)
         stopService(intent)
         binding.tvServiceRunning.visibility = View.GONE
-        binding.tvStatus.text = "状态: 已停止后台服务"
+        binding.tvStatus.text = getString(R.string.status_service_stopped)
         // 等服务销毁（isRunning=false）后恢复预览模式
         lifecycleScope.launch {
             delay(500)
@@ -269,9 +281,9 @@ class MainActivity : AppCompatActivity() {
             while (isActive) {
                 binding.tvStatus.text =
                     if (VisionForegroundService.isConnected) {
-                        "状态: 后台运行中 · MQTT 已连接"
+                        getString(R.string.status_service_connected)
                     } else {
-                        "状态: 后台运行中 · MQTT 未连接（检查 Broker 地址/端口映射）"
+                        getString(R.string.status_service_disconnected)
                     }
                 delay(1000)
             }
